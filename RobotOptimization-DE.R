@@ -3,41 +3,56 @@ library(DEoptim)  # For DE algorithm
 library(ggplot2)  # For plotting
 library(pracma)   # For PID implementation
 library(matlib)   # For matrix operations, useful in MPC
+library(quadprog) # For solving quadratic programming problems used in MPC
 
 # Define target positions for the robot
 target_x <- 5
 target_y <- 5
 
-# Define the objective function for DE optimization
+# Improved DE optimization simulation function
 objective_function <- function(params) {
-  x <- params[1]
-  y <- params[2]
+  x <- 0  # initial position x
+  y <- 0  # initial position y
   
-  # Define the cost components
-  time_cost <- abs(x - target_x)
-  energy_cost <- abs(y - target_y)
-  accuracy_error <- (x - target_x)^2 + (y - target_y)^2
+  u_x <- params[1]  # control input for x
+  u_y <- params[2]  # control input for y
   
-  # Calculate the total cost
-  total_cost <- 0.4 * time_cost + 0.3 * energy_cost + 0.3 * accuracy_error
+  time_steps <- 50
+  total_time <- 0
+  total_energy <- 0
+  total_error <- 0
+  
+  for (i in 1:time_steps) {
+    x <- x + u_x
+    y <- y + u_y
+    
+    time_cost <- abs(x - target_x) + abs(y - target_y)
+    energy_cost <- abs(u_x) + abs(u_y)
+    accuracy_error <- (x - target_x)^2 + (y - target_y)^2
+    
+    total_time <- total_time + time_cost
+    total_energy <- total_energy + energy_cost
+    total_error <- total_error + accuracy_error
+  }
+  
+  total_cost <- 0.5 * total_time + 0.3 * total_energy + 0.2 * total_error
   return(total_cost)
 }
 
 # DE optimization settings
-lower_bound <- c(-10, -10)
-upper_bound <- c(10, 10)
-control_params <- list(NP = 30, itermax = 200, F = 0.8, CR = 0.9)
+lower_bound <- c(-0.5, -0.5)
+upper_bound <- c(0.5, 0.5)
+control_params <- list(NP = 50, itermax = 300, F = 0.9, CR = 0.8)
 
 # Run DE optimization
 de_result <- DEoptim(objective_function, lower = lower_bound, upper = upper_bound, DEoptim.control(control_params))
-de_time <- 10.8  # Hypothetical time obtained for DE
-
-de_energy <- 9.2  # Hypothetical energy obtained for DE
-de_error <- 3.2  # Hypothetical accuracy error obtained for DE
+best_params <- de_result$optim$bestmem
+de_time <- sum(abs(best_params[1]) * 50)
+de_energy <- sum(abs(best_params[2]) * 50)
+de_error <- (de_time - target_x)^2 + (de_energy - target_y)^2
 
 # Simulate PID control
 simulate_pid <- function(target, kp, ki, kd) {
-  # Parameters
   current_position <- 0
   error_sum <- 0
   last_error <- 0
@@ -69,14 +84,45 @@ pid_error <- pid_result[3]
 
 # Simulate MPC control
 simulate_mpc <- function(target) {
-  # Placeholder simulation for MPC
-  time_taken <- 12.3  # Hypothetical time for MPC
-  energy_used <- 10.4  # Hypothetical energy for MPC
-  accuracy_error <- 4.7  # Hypothetical accuracy error for MPC
-  return(c(time_taken, energy_used, accuracy_error))
+  A <- matrix(c(1, 0, 0, 1), nrow = 2)
+  B <- matrix(c(0.1, 0.1), nrow = 2)
+  Q <- diag(2)
+  R <- matrix(0.1, nrow = 1, ncol = 1)
+  x <- c(0, 0)
+  
+  N <- 10
+  time_steps <- 50
+  u <- numeric(time_steps)
+  
+  total_time <- 0
+  total_energy <- 0
+  total_error <- 0
+  
+  for (i in 1:time_steps) {
+    Dmat <- 2 * (t(B) %*% Q %*% B + R)
+    dvec <- 2 * t(x - c(target, target)) %*% Q %*% B
+    
+    Amat <- diag(length(dvec))
+    bvec <- rep(0.1, length(dvec))
+    
+    res <- solve.QP(Dmat, as.vector(dvec), t(Amat), bvec, meq = 0)
+    u[i] <- res$solution[1]
+    
+    x <- A %*% x + B * u[i]
+    
+    time_cost <- abs(x[1] - target) + abs(x[2] - target)
+    energy_cost <- sum(abs(u[i]))
+    accuracy_error <- (x[1] - target)^2 + (x[2] - target)^2
+    
+    total_time <- total_time + time_cost
+    total_energy <- total_energy + energy_cost
+    total_error <- total_error + accuracy_error
+  }
+  
+  return(c(total_time, total_energy, total_error))
 }
 
-# Results for MPC
+# Run the simulation for MPC
 mpc_result <- simulate_mpc(5)
 mpc_time <- mpc_result[1]
 mpc_energy <- mpc_result[2]
@@ -90,35 +136,26 @@ results <- data.frame(
   Error = c(pid_error, mpc_error, de_error)
 )
 
-# Print the results
-print(results)
+# Plotting results using ggplot2 for comparison
+library(reshape2)
 
+# Reshape data for grouped bar chart
+results_melt <- melt(results, id.vars = "Method")
 
-
-
-
-
-# Plotting the results using ggplot2
-ggplot(results, aes(x = Method)) +
-  geom_bar(aes(y = Time, fill = "Time"), stat = "identity", position = "dodge") +
-  geom_bar(aes(y = Energy, fill = "Energy"), stat = "identity", position = "dodge") +
-  geom_bar(aes(y = Error, fill = "Error"), stat = "identity", position = "dodge") +
-  scale_fill_manual(values = c("Time" = "red", "Energy" = "green", "Error" = "blue")) +
+# Create grouped bar chart for Time, Energy, and Error
+ggplot(results_melt, aes(x = Method, y = value, fill = variable)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
   labs(title = "Comparison of Control Methods", y = "Value", x = "Method") +
+  scale_fill_manual(values = c("Time" = "red", "Energy" = "green", "Error" = "blue"), 
+                    name = "Metrics") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Create a line plot to see trends over methods
+ggplot(results_melt, aes(x = Method, y = value, color = variable, group = variable)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  labs(title = "Performance Trends of Control Methods", y = "Value", x = "Method") +
+  scale_color_manual(values = c("Time" = "red", "Energy" = "green", "Error" = "blue"),
+                     name = "Metrics") +
   theme_minimal()
-
-# Radar chart to visualize the overall performance
-library(fmsb)
-performance_data <- rbind(
-  c(max(results$Time), max(results$Energy), max(results$Error)),
-  c(min(results$Time), min(results$Energy), min(results$Error)),
-  results[1, 2:4],
-  results[2, 2:4],
-  results[3, 2:4]
-)
-colnames(performance_data) <- c("Time", "Energy", "Error")
-
-radarchart(performance_data, axistype = 1,
-           pcol = c("red", "green", "blue"), pfcol = c(rgb(1,0,0,0.2), rgb(0,1,0,0.2), rgb(0,0,1,0.2)),
-           plwd = 2, cglcol = "grey", cglty = 1, axislabcol = "grey", caxislabels = seq(0, max(performance_data), 5), cglwd = 0.8)
-legend(x = "topright", legend = c("PID", "MPC", "DE"), col = c("red", "green", "blue"), lty = 1, bty = "n")
